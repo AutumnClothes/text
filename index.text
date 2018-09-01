@@ -1,0 +1,184 @@
+/*前端的权限控制实质上就是路由控制，真正的安全是由后端控制的*/
+
+/*定义接口验证，根据Token 的身份验证方法*/
+const tokencode = axios.create()
+//增加请求拦截器
+tokencode.interceptors.request.use(config=>{
+    //添加请求头，内容为token
+    config.headers.Authorization = `${token}`
+    return config
+});
+
+export default tokencode
+
+/*验证权限 */
+//在mian.js引入store from vuex
+
+//动态挂载路由 authRouter
+export function authRouter ({commit,state},payload){
+    // 路由动态挂载完成后resolve出去
+    return new Promise((resolve, reject)=>{
+        var menuList = payload.menuList,
+        permissionList = payload.permissionList
+        // 如果获取的权限菜单或按钮数组任一为空，则表明无权访问
+        if(!menuList.length || !permissionList.length){
+        reject('无权访问，请联系管理员进行授权')
+    }
+
+    //处理代码
+        // 把permissionList处理成一个不含中文冒号不含空字符串的数组放到state中，方便在组件中判断
+        var _permissionList=[],permList=[]
+            permissionList.forEach(item=>{
+            // 如果有中文冒号，将其替换为英文冒号
+            if(item.indexOf('：') != -1){
+            item = item.replace(/：/g,':')
+        }
+        // 跳过菜单，只取权限
+        if(item.split(':').length!=1){
+            permList.push(util.trimArray(item.split(':')).join(':'))
+            }
+            _permissionList.push(util.trimArray(item.split(':')))
+        })
+        // 更新按钮权限
+        commit('updatePermissionList',permList)
+        var permissionListNames = []
+        _permissionList.forEach(item=>[
+            permissionListNames.push(item[0])
+        ])
+    // 最终的有权限的所有菜单 .concat(menuList) 保证肯定可以过滤所有菜单
+    permissionListNames = [...new Set(permissionListNames)]
+    var menuRoutes = util.deepcopy(appRoutes),permissionRoutes=[],copyItem
+    // 生成父级菜单路由
+    var parentRoutesNamesArr=[]
+    permissionListNames.forEach(_item=>{
+        // 将父级加进权限路由
+        var _name = util.getParentRouterNameByName(_item)
+        parentRoutesNamesArr.push(_name)
+    })
+    parentRoutesNamesArr = [...new Set(parentRoutesNamesArr)]
+    menuRoutes.forEach(item => {
+        parentRoutesNamesArr.forEach(name=>{
+            if(item.name==name){
+                copyItem=util.deepcopy(item)
+                copyItem.children=[]
+                permissionRoutes.push(copyItem)
+            }
+        })
+    });
+    // 生成父级菜单路由 end
+    // 将有权访问的子菜单路由放进permissionRoutes
+    menuRoutes.forEach(item => {
+        if(item.children){
+            item.children.forEach(child=>{
+            // 遍历所有子菜单，通过name获取的父name值与item.name值相同时将child推入指定的路由
+                permissionListNames.forEach(name=>{
+                // 子name相同就push
+                    if(name==child.name){
+                        permissionRoutes.forEach(permItem=>{
+                            if(permItem.name==item.name){
+                                permItem.children.push(child)
+                            }
+                        })
+                    }
+                })
+            })
+        }
+    });
+    // permissionRoutes 最终通过权限的路由表
+    // var _routes = permissionRoutes.push(...errorRoutes) //这个为什么是两个数组拼在一起的数组长度
+    var _routes = permissionRoutes.concat(errorRoutes)
+    router.addRoutes(_routes)
+
+//获取权限 getAuth
+export function getAuth({dispatch},params){
+    return new Promise((resolve,reject)=>{
+        params = params || {
+            url : 'web/.....',
+            method : 'post'
+        }
+        //发送http请求
+        http(params).then(res=>{
+            //成功且返回码为200
+            if(res&&res.status == 200){
+                var resData = res.data
+                //判断权限,code为权限约定
+                if(resData.code == 1){
+                    var data = resData.data
+                    dispatch('authRouter',data).then(()=>{
+                        resolve(data)
+                    }).catch(()=>{
+                        reject()
+                    })
+                }
+            }
+        })
+    })
+}
+
+router.beforeEach((to, from, next) => {
+    //调用的iview的loadingbar组件
+    iView.LoadingBar.start();
+    var name = to.name
+    var currentPageName = sessionStorage.currentPageName
+    if (name == 'login') { // 判断当前是否是登录页
+        next();
+    } 
+    //如果不是登录页，且已登录，验证权限
+    else if (getCookie(user)) {
+        //获取授权列表
+        var len = store.state.permissionList.length
+        if(len){
+            //已授权
+            next()
+            if(store.state.stringObject.indexOf(name)){
+                //更新状态
+                sessionStorage.currentPageName = to.name
+                store.dispatch('setCurrentPath',name)//store状态更新：当前路径为name
+            }
+        }else{
+            //未授权
+            store.dispatch('getAuth').then(()=>{
+                //获取到权限
+                //name可能丢失
+                if(name){
+                    if(name == 404){
+                        next({name : currentPageName})
+                    }else{
+                        next()
+                    }
+                }else{
+                    next({'name' : currentPageName})
+                }
+            }).catch(()=>{
+                //没有获取到权限
+                Message.info('未获取到授权信息，重新登录')
+                next({'name' : 'login'})
+                store.dispatch('exitLogin')//store状态更新为退出登录
+            })
+        }
+    } 
+    //如果不是登录页，且未登录,前往登录页
+    else {
+        next({'name' : 'login'})
+    }
+});
+
+router.afterEach((to) => {
+    Util.openNewPage(router.app, to.name, to.params, to.query);
+    iView.LoadingBar.finish();
+    window.scrollTo(0, 0);
+});
+
+
+/*防止刷新丢失路由*/
+//写入app.vue
+created () {
+    // 当this.$router.routes的长度为1，且本地缓存存在
+    if (this.$router.routes.length <= 1 && sessionStorage.getItem('routerList')) {
+        let subList = JSON.parse(decrypt(sessionStorage.getItem('routerList')))
+        let routes = handleMenu.mergeRoutes(subList)
+        this.$router.addRoutes(routes)
+        // this.$router不是响应式的，所以手动将路由元注入路由对象
+        this.$router.options.routes.push(routes)
+    } 
+}
